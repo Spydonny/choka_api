@@ -6,7 +6,7 @@ from groq import Groq
 
 from config import (
     GROQ_API_KEY, GROQ_MODEL, MAX_TOKENS, TEMPERATURE, MAX_HISTORY,
-    HISTORY_TTL_HOURS, now_kz,
+    HISTORY_TTL_HOURS, now_kz, CLUB_INFO,
 )
 from db import get_owner_metrics, load_history, save_session
 from prompts import CLIENT_PROMPT, OWNER_PROMPT
@@ -58,11 +58,23 @@ def build_time_context() -> str:
 _NO_THINK = " /no_think"
 
 
+def build_contacts_context() -> str:
+    """Реальные контакты клуба из config — чтобы бот давал настоящий телефон/адрес,
+    а не выдумывал номер (был баг: модель сама сочиняла «+7 (707) ...»)."""
+    return (
+        "\n\nКОНТАКТЫ КЛУБА (если клиент спрашивает телефон/адрес/часы или как связаться — "
+        "давай ИМЕННО эти данные, другие номера не выдумывай):\n"
+        f"Телефон: {CLUB_INFO['phone']}\n"
+        f"Адрес: {CLUB_INFO['address']}\n"
+        f"Часы работы: {CLUB_INFO['hours']}"
+    )
+
+
 def build_system_prompt(is_owner: bool) -> str:
     """Собирает системный промпт с реальными датой/временем (и статистикой — для владельца)."""
     date_context = build_time_context()
     if not is_owner:
-        return CLIENT_PROMPT + date_context + _NO_THINK
+        return CLIENT_PROMPT + build_contacts_context() + date_context + _NO_THINK
 
     m = get_owner_metrics()
     if m["week_delta_pct"] is None:

@@ -23,6 +23,9 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "choka2026")
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "choka-admin-secret-" + ADMIN_PASSWORD)
 # Кэшбэк бонусами: процент от суммы брони начисляется на номер телефона клиента.
 BONUS_CASHBACK_PCT = int(os.environ.get("BONUS_CASHBACK_PCT", "5"))
+# Окно (в часах) для ручного начисления кэшбэка по номеру: ищем последнюю бронь
+# клиента, созданную за это время (см. bonus.accrue_from_last_booking).
+BONUS_ACCRUE_WINDOW_HOURS = int(os.environ.get("BONUS_ACCRUE_WINDOW_HOURS", "3"))
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 # Не печатаем сам ключ в логи — только факт наличия.

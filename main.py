@@ -28,7 +28,7 @@ from whatsapp import (
 import admin_auth
 import bonus as bonus_svc
 import tournaments as tour_svc
-from booking import try_create_booking, check_availability, zones_occupancy
+from booking import try_create_booking, create_booking, check_availability, zones_occupancy
 
 
 @asynccontextmanager
@@ -182,6 +182,11 @@ class BonusOp(BaseModel):
     name: Optional[str] = None
 
 
+class BonusAuto(BaseModel):
+    phone: str
+    hours: Optional[int] = None
+
+
 class ChatSend(BaseModel):
     text: str
 
@@ -269,6 +274,22 @@ def admin_bookings(
     _: bool = Depends(admin_auth.require_admin),
 ):
     return {"bookings": list_bookings(only_upcoming=upcoming)}
+
+
+@app.post("/admin/booking")
+def admin_create_booking(body: BookingIn, _: bool = Depends(admin_auth.require_admin)):
+    """Ручное создание брони админом. Проверяет, что время в зоне не занято."""
+    phone = bonus_svc.normalize_phone(body.phone)
+    raw = body.model_dump()
+    raw.pop("phone", None)
+    result = create_booking(phone, raw)
+    if not result["ok"]:
+        # 409 — выбранное время уже занято, 400 — некорректные данные брони.
+        raise HTTPException(
+            status_code=409 if result["status"] == "busy" else 400,
+            detail=result["message"],
+        )
+    return {"message": result["message"], "booking": result["booking"]}
 
 
 # ─── Админ: турниры ─────────────────────────────────────────────
@@ -379,6 +400,17 @@ def admin_bonus_redeem(body: BonusOp, _: bool = Depends(admin_auth.require_admin
         return bonus_svc.redeem_bonus(
             body.phone, body.amount, body.reason or "Списание бонусов"
         )
+    except ValueError as e:
+        raise _bad_request(e)
+
+
+@app.post("/admin/bonus/accrue-last")
+def admin_bonus_accrue_last(body: BonusAuto, _: bool = Depends(admin_auth.require_admin)):
+    """Начисляет кэшбэк по последней броне клиента (по умолчанию за последние 3 ч)."""
+    try:
+        if body.hours is not None:
+            return bonus_svc.accrue_from_last_booking(body.phone, body.hours)
+        return bonus_svc.accrue_from_last_booking(body.phone)
     except ValueError as e:
         raise _bad_request(e)
 

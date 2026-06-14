@@ -7,8 +7,8 @@
 """
 import re
 
-from config import BONUS_CASHBACK_PCT, now_kz
-from db import bonuses_col
+from config import BONUS_CASHBACK_PCT, BONUS_ACCRUE_WINDOW_HOURS, now_kz
+from db import bonuses_col, find_last_booking_within, mark_booking_accrued
 
 
 def normalize_phone(phone: str) -> str:
@@ -80,15 +80,34 @@ def redeem_bonus(phone: str, amount: int, reason: str = "Списание бон
     return _apply(phone, -amount, reason, "redeem")
 
 
-def accrue_for_booking(phone: str, booking_amount: int, name: str = "") -> int:
-    """Кэшбэк с брони. Возвращает сколько бонусов начислено (0 — если выключено)."""
-    if BONUS_CASHBACK_PCT <= 0 or booking_amount <= 0:
-        return 0
-    bonus = round(booking_amount * BONUS_CASHBACK_PCT / 100)
+def accrue_from_last_booking(phone: str, hours: int = BONUS_ACCRUE_WINDOW_HOURS) -> dict:
+    """Начисляет кэшбэк по ПОСЛЕДНЕЙ броне клиента за последние `hours` часов.
+
+    Сумму бонусов считаем от стоимости этой брони (BONUS_CASHBACK_PCT). Одну и ту
+    же бронь повторно не начисляем (флаг bonus_accrued на документе брони).
+    Возвращает обновлённый бонусный счёт (как add_bonus/redeem_bonus).
+    """
+    p = normalize_phone(phone)
+    if not p:
+        raise ValueError("Некорректный номер телефона")
+    if BONUS_CASHBACK_PCT <= 0:
+        raise ValueError("Начисление кэшбэка отключено")
+
+    booking = find_last_booking_within(p, hours)
+    if not booking:
+        raise ValueError(f"Нет брони за последние {hours} ч для номера {p}")
+    if booking.get("bonus_accrued"):
+        raise ValueError("По последней брони бонусы уже начислены")
+
+    amount = int(booking.get("amount") or 0)
+    bonus = round(amount * BONUS_CASHBACK_PCT / 100)
     if bonus <= 0:
-        return 0
-    try:
-        _apply(phone, bonus, f"Кэшбэк {BONUS_CASHBACK_PCT}% с брони", "accrue", name)
-    except ValueError:
-        return 0
-    return bonus
+        raise ValueError("По последней брони не из чего начислить (сумма 0)")
+
+    reason = (
+        f"Кэшбэк {BONUS_CASHBACK_PCT}% с брони "
+        f"{booking.get('date', '')} {booking.get('time_from', '')} ({amount} ₸)"
+    ).strip()
+    account = _apply(p, bonus, reason, "accrue", booking.get("name", ""))
+    mark_booking_accrued(booking["_id"], bonus)
+    return account

@@ -8,7 +8,6 @@ from config import ZONE_CAPACITY, ZONE_LABELS, ZONE_ALIASES, now_kz
 from db import bookings_col, save_booking, find_active_bookings, cancel_booking_doc, span_iso
 from pricing import booking_amount
 from whatsapp import notify_owner
-from bonus import accrue_for_booking
 
 
 def _parse_hm(value: str) -> Optional[int]:
@@ -158,22 +157,33 @@ def validate_booking(booking: dict[str, Any]) -> tuple[bool, str, Optional[dict]
     return True, "", normalized
 
 
-def try_create_booking(chat_id: str, raw_booking: dict[str, Any]) -> str:
-    """Валидирует, проверяет занятость и сохраняет бронь. Возвращает текст клиенту."""
+def create_booking(chat_id: str, raw_booking: dict[str, Any]) -> dict[str, Any]:
+    """Валидирует, проверяет занятость и сохраняет бронь.
+
+    Возвращает структурированный результат, по которому удобно ветвиться
+    программно (бот берёт только текст, админка — статус и саму бронь):
+      {ok, status: "ok"|"invalid"|"busy", message, booking}
+    """
     ok, err, b = validate_booking(raw_booking)
     if not ok:
-        return err
+        return {"ok": False, "status": "invalid", "message": err, "booking": None}
 
     capacity = ZONE_CAPACITY[b["zone"]]
     busy = count_overlapping(b["zone"], b["date"], b["_t_from"], b["_t_to"])
     label = ZONE_LABELS[b["zone"]]
 
+    # Валидация занятости: на это время в зоне не должно быть мест больше вместимости.
     if busy >= capacity:
-        return (
-            f"К сожалению, на {b['date']} с {b['time_from']} до {b['time_to']} "
-            f"зона «{label}» уже занята (все {capacity} мест). "
-            "Выберите, пожалуйста, другое время или дату."
-        )
+        return {
+            "ok": False,
+            "status": "busy",
+            "message": (
+                f"К сожалению, на {b['date']} с {b['time_from']} до {b['time_to']} "
+                f"зона «{label}» уже занята (все {capacity} мест). "
+                "Выберите, пожалуйста, другое время или дату."
+            ),
+            "booking": None,
+        }
 
     phone = chat_id.split("@")[0]
     doc = save_booking(
@@ -189,9 +199,8 @@ def try_create_booking(chat_id: str, raw_booking: dict[str, Any]) -> str:
         end_at=span_iso(b["date"], b["_t_to"]),
     )
 
-    # Кэшбэк бонусами на номер клиента (см. bonus.py / BONUS_CASHBACK_PCT).
-    accrued = accrue_for_booking(phone, b["amount"], b["name"])
-
+    # Кэшбэк начисляется не при создании брони, а вручную админом по номеру
+    # телефона из последней брони клиента (см. bonus.accrue_from_last_booking).
     notify_owner(
         f"Зона: {label}\n"
         f"Дата: {b['date']}\n"
@@ -204,12 +213,23 @@ def try_create_booking(chat_id: str, raw_booking: dict[str, Any]) -> str:
     )
     print(f"DEBUG: бронь сохранена: {doc}")
 
-    bonus_line = f" Начислено {accrued} бонусов." if accrued else ""
-    return (
-        f"Бронь принята! {label}, {b['date']}, с {b['time_from']} до {b['time_to']}, "
-        f"{b['persons']} чел. Стоимость: {b['amount']} ₸.{bonus_line} "
-        f"Ждём вас! Если что-то изменится — напишите нам."
-    )
+    out = dict(doc)
+    out["id"] = str(out.pop("_id", ""))
+    return {
+        "ok": True,
+        "status": "ok",
+        "message": (
+            f"Бронь принята! {label}, {b['date']}, с {b['time_from']} до {b['time_to']}, "
+            f"{b['persons']} чел. Стоимость: {b['amount']} ₸. "
+            f"Ждём вас! Если что-то изменится — напишите нам."
+        ),
+        "booking": out,
+    }
+
+
+def try_create_booking(chat_id: str, raw_booking: dict[str, Any]) -> str:
+    """Текстовая обёртка над create_booking — для бота (WhatsApp/чат)."""
+    return create_booking(chat_id, raw_booking)["message"]
 
 
 def check_availability(raw: dict[str, Any]) -> str:

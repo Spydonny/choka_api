@@ -31,6 +31,8 @@ def init_db():
     blocked_col.create_index("phone", unique=True)
     # Доставляем интервал старым броням, у которых его ещё нет.
     backfill_booking_spans()
+    # Сводим раздвоенные диалоги (chatId '@c.us' vs. чистые цифры) в один тред.
+    normalize_session_phones()
 
 
 def span_iso(date_str, total_minutes):
@@ -113,6 +115,35 @@ def find_active_bookings(phone):
     return list(cursor)
 
 
+def find_last_booking_within(phone, hours):
+    """Последняя НЕотменённая бронь клиента, созданная за последние `hours` часов.
+
+    Возвращает документ брони или None. Телефон сравниваем по цифрам (как он и
+    хранится: из чата — '7705...@c.us'.split('@')[0], с сайта — нормализованный).
+    """
+    since = (now_kz() - timedelta(hours=hours)).isoformat()
+    return bookings_col.find_one(
+        {
+            "phone": _digits(phone),
+            "status": {"$ne": "cancelled"},
+            "created_at": {"$gte": since},
+        },
+        sort=[("created_at", -1)],
+    )
+
+
+def mark_booking_accrued(booking_id, bonus):
+    """Помечает бронь как «кэшбэк начислен» — чтобы не начислить по ней дважды."""
+    bookings_col.update_one(
+        {"_id": booking_id},
+        {"$set": {
+            "bonus_accrued": True,
+            "bonus_amount": int(bonus),
+            "bonus_accrued_at": now_kz().isoformat(),
+        }},
+    )
+
+
 def cancel_booking_doc(booking_id) -> bool:
     """Помечает бронь отменённой по _id. True, если что-то изменилось."""
     res = bookings_col.update_one(
@@ -123,8 +154,10 @@ def cancel_booking_doc(booking_id) -> bool:
 
 
 def save_session(phone, message, response):
+    # Ключ диалога — всегда чистые цифры (без '@c.us'), чтобы сообщения бота и
+    # ручные ответы владельца сходились в один тред, а не раздваивались.
     sessions_col.insert_one({
-        "phone": phone,
+        "phone": _digits(phone),
         "message": message,
         "response": response,
         "created_at": now_kz().isoformat(),
@@ -134,7 +167,7 @@ def save_session(phone, message, response):
 def save_manual_message(phone, text):
     """Сохраняет ручной ответ владельца в ленту диалога (роль owner)."""
     sessions_col.insert_one({
-        "phone": phone,
+        "phone": _digits(phone),
         "message": "",
         "response": text,
         "manual": True,
@@ -144,8 +177,23 @@ def save_manual_message(phone, text):
 
 # ─── Блокировка клиентов ────────────────────────────────────────
 def _digits(phone):
-    """Только цифры номера — единый ключ для блокировок."""
+    """Только цифры номера — единый ключ для блокировок и диалогов."""
     return re.sub(r"\D", "", phone or "")
+
+
+def normalize_session_phones():
+    """Старые сессии бота хранили телефон как chatId Green API ('7705...@c.us'),
+    а ручные ответы владельца — как чистые цифры. Из-за этого один клиент
+    раздваивался в списке диалогов. Приводим телефоны всех сессий к цифрам,
+    чтобы раздвоенные ветки слились в один тред (разовая миграция при старте)."""
+    fixed = 0
+    for s in sessions_col.find({"phone": {"$regex": r"\D"}}, {"phone": 1}):
+        digits = _digits(s.get("phone"))
+        if digits and digits != s.get("phone"):
+            sessions_col.update_one({"_id": s["_id"]}, {"$set": {"phone": digits}})
+            fixed += 1
+    if fixed:
+        print(f"DEBUG: нормализовано телефонов в сессиях: {fixed}")
 
 
 def is_blocked(phone) -> bool:
@@ -210,7 +258,7 @@ def list_conversations(limit=80):
 
 def conversation_messages(phone, limit=300):
     """Лента сообщений диалога: клиент -> ai/owner, в хронологическом порядке."""
-    cursor = sessions_col.find({"phone": phone}).sort("created_at", 1).limit(limit)
+    cursor = sessions_col.find({"phone": _digits(phone)}).sort("created_at", 1).limit(limit)
     msgs = []
     for s in cursor:
         if s.get("message"):
@@ -231,7 +279,7 @@ def load_history(phone, max_messages, ttl_hours):
     since = (now_kz() - timedelta(hours=ttl_hours)).isoformat()
     # Берём последние обмены (две реплики на обмен) в пределах окна.
     cursor = (
-        sessions_col.find({"phone": phone, "created_at": {"$gte": since}})
+        sessions_col.find({"phone": _digits(phone), "created_at": {"$gte": since}})
         .sort("created_at", -1)
         .limit(max(1, max_messages // 2))
     )
