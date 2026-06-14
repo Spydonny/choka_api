@@ -1,15 +1,15 @@
 """Green API: отправка сообщений, телефоны, разбор входящего вебхука."""
-import re
 from typing import Any, Optional
 
 import requests
 
 from config import GREEN_API_URL, GREEN_API_ID, GREEN_API_TOKEN, OWNER_PHONE
+from phones import normalize_phone
 
 
 def digits_only(phone: str) -> str:
-    """Оставляет только цифры номера: '+7 776-294-90-09' -> '77762949009'."""
-    return re.sub(r"\D", "", phone or "")
+    """Только цифры номера (с нормализацией 8→7) — единый ключ телефона."""
+    return normalize_phone(phone)
 
 
 def to_chat_id(phone: str) -> str:

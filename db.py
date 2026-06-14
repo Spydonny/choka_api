@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from pymongo import MongoClient
 
 from config import MONGODB_URI, MONGODB_DB, ZONE_LABELS, KZ_TZ, now_kz
+from phones import normalize_phone
 
 mongo_client = MongoClient(MONGODB_URI)
 db = mongo_client[MONGODB_DB]
@@ -104,6 +105,26 @@ def list_bookings(limit=100, only_upcoming=False):
     return out
 
 
+def bookings_in_range(date_from, date_to, zone=None):
+    """Активные брони в диапазоне дат [date_from; date_to] (включительно).
+
+    Для недельного календаря. `date` хранится как 'YYYY-MM-DD' — для ISO-дат
+    лексикографическое сравнение совпадает с хронологическим. Опц. фильтр по зоне.
+    """
+    query = {
+        "status": {"$ne": "cancelled"},
+        "date": {"$gte": date_from, "$lte": date_to},
+    }
+    if zone:
+        query["zone"] = zone
+    out = []
+    for b in bookings_col.find(query).sort([("date", 1), ("time_from", 1)]):
+        b = dict(b)
+        b["id"] = str(b.pop("_id"))
+        out.append(b)
+    return out
+
+
 def find_active_bookings(phone):
     """Активные (не отменённые, на сегодня и позже) брони клиента по телефону."""
     today = now_kz().strftime("%Y-%m-%d")
@@ -177,8 +198,8 @@ def save_manual_message(phone, text):
 
 # ─── Блокировка клиентов ────────────────────────────────────────
 def _digits(phone):
-    """Только цифры номера — единый ключ для блокировок и диалогов."""
-    return re.sub(r"\D", "", phone or "")
+    """Только цифры номера (с нормализацией 8→7) — единый ключ диалогов/блокировок."""
+    return normalize_phone(phone)
 
 
 def normalize_session_phones():

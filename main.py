@@ -15,7 +15,7 @@ from config import (
     GREEN_API_ID, OWNER_PHONE,
 )
 from db import (
-    init_db, get_stats, get_owner_metrics, list_bookings,
+    init_db, get_stats, get_owner_metrics, list_bookings, bookings_in_range,
     list_conversations, conversation_messages, save_manual_message,
     is_blocked, block_phone, unblock_phone,
 )
@@ -28,6 +28,7 @@ from whatsapp import (
 import admin_auth
 import bonus as bonus_svc
 import tournaments as tour_svc
+from phones import is_valid_phone, PHONE_ERROR
 from booking import try_create_booking, create_booking, check_availability, zones_occupancy
 
 
@@ -239,6 +240,23 @@ def api_occupancy(
     return zones_occupancy(date, time_from, time_to)
 
 
+@app.get("/api/schedule")
+def api_schedule(
+    date_from: str = Query(..., alias="from"),
+    date_to: str = Query(..., alias="to"),
+    zone: Optional[str] = Query(None),
+):
+    """Анонимные занятые слоты зоны за период — для недельного календаря на сайте.
+
+    Без имён/телефонов: только зона, дата и время (для отображения занятости).
+    """
+    blocks = [
+        {"date": b["date"], "time_from": b["time_from"], "time_to": b["time_to"], "zone": b["zone"]}
+        for b in bookings_in_range(date_from, date_to, zone)
+    ]
+    return {"blocks": blocks}
+
+
 @app.post("/api/booking/check")
 def api_booking_check(body: CheckIn):
     return {"message": check_availability(body.model_dump())}
@@ -247,9 +265,9 @@ def api_booking_check(body: CheckIn):
 @app.post("/api/booking")
 def api_booking_create(body: BookingIn):
     """Заявка на бронь с сайта. Телефон используется как идентификатор клиента."""
+    if not is_valid_phone(body.phone):
+        raise HTTPException(status_code=400, detail=PHONE_ERROR)
     phone = bonus_svc.normalize_phone(body.phone)
-    if not phone:
-        raise HTTPException(status_code=400, detail="Укажите корректный номер телефона")
     raw = body.model_dump()
     raw.pop("phone", None)
     message = try_create_booking(phone, raw)
@@ -276,9 +294,22 @@ def admin_bookings(
     return {"bookings": list_bookings(only_upcoming=upcoming)}
 
 
+@app.get("/admin/bookings/range")
+def admin_bookings_range(
+    date_from: str = Query(..., alias="from"),
+    date_to: str = Query(..., alias="to"),
+    zone: Optional[str] = Query(None),
+    _: bool = Depends(admin_auth.require_admin),
+):
+    """Брони за период (для недельного календаря админа) — с именами и деталями."""
+    return {"bookings": bookings_in_range(date_from, date_to, zone)}
+
+
 @app.post("/admin/booking")
 def admin_create_booking(body: BookingIn, _: bool = Depends(admin_auth.require_admin)):
     """Ручное создание брони админом. Проверяет, что время в зоне не занято."""
+    if not is_valid_phone(body.phone):
+        raise HTTPException(status_code=400, detail=PHONE_ERROR)
     phone = bonus_svc.normalize_phone(body.phone)
     raw = body.model_dump()
     raw.pop("phone", None)
