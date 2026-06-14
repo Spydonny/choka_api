@@ -27,6 +27,15 @@ BONUS_CASHBACK_PCT = int(os.environ.get("BONUS_CASHBACK_PCT", "5"))
 # клиента, созданную за это время (см. bonus.accrue_from_last_booking).
 BONUS_ACCRUE_WINDOW_HOURS = int(os.environ.get("BONUS_ACCRUE_WINDOW_HOURS", "3"))
 
+# ─── Фоновые напоминания/отзывы ─────────────────────────────────
+# За сколько минут до начала брони слать напоминание клиенту.
+REMINDER_LEAD_MINUTES = int(os.environ.get("REMINDER_LEAD_MINUTES", "60"))
+# Просьбу об отзыве шлём только если бронь закончилась не позже стольких часов
+# назад (чтобы при простое сервиса не разослать отзывы за старые визиты).
+REVIEW_MAX_AGE_HOURS = int(os.environ.get("REVIEW_MAX_AGE_HOURS", "6"))
+# Как часто фоновый цикл проверяет брони (секунды).
+REMINDER_TICK_SECONDS = int(os.environ.get("REMINDER_TICK_SECONDS", "60"))
+
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 # Не печатаем сам ключ в логи — только факт наличия.
 print(f"DEBUG: GROQ_API_KEY {'задан' if GROQ_API_KEY else 'НЕ задан'}")

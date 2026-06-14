@@ -37,6 +37,19 @@ def send_message_to_whatsapp(chat_id: str, text: str):
     return response
 
 
+def notify_client(phone: str, text: str):
+    """Сообщение клиенту в WhatsApp (бронь принята / оплата получена).
+
+    Не должно ронять основной поток: без ключей Green API или номера — просто выходим.
+    """
+    if not GREEN_API_ID or not digits_only(phone):
+        return
+    try:
+        send_message_to_whatsapp(to_chat_id(phone), text)
+    except Exception as e:
+        print(f"notify_client error: {e}")
+
+
 def notify_owner(booking_info: str):
     # Уведомление владельца не должно ронять основной поток (например, веб-бронь
     # при отсутствующих ключах Green API). Ошибки только логируем.

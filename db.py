@@ -2,7 +2,8 @@
 import re
 from datetime import datetime, timedelta
 
-from pymongo import MongoClient
+from bson import ObjectId
+from pymongo import MongoClient, ReturnDocument
 
 from config import MONGODB_URI, MONGODB_DB, ZONE_LABELS, KZ_TZ, now_kz
 from phones import normalize_phone
@@ -34,6 +35,18 @@ def init_db():
     backfill_booking_spans()
     # Сводим раздвоенные диалоги (chatId '@c.us' vs. чистые цифры) в один тред.
     normalize_session_phones()
+    # Старый статус "new" → "pending" (ожидается оплата); пустой статус тоже.
+    backfill_booking_status()
+    # Чтобы при старте не разослать напоминания/отзывы за уже прошедшие брони.
+    backfill_notification_flags()
+
+
+def backfill_booking_status():
+    """Приводит старые брони к статусам оплаты: 'new'/отсутствует → 'pending'."""
+    bookings_col.update_many(
+        {"$or": [{"status": "new"}, {"status": {"$exists": False}}]},
+        {"$set": {"status": "pending"}},
+    )
 
 
 def span_iso(date_str, total_minutes):
@@ -83,11 +96,35 @@ def save_booking(phone, name, zone_key, date, time_from, time_to, persons,
         "end_at": end_at,
         "persons": persons,
         "amount": amount,
-        "status": "new",
+        # Статус оплаты: pending (ожидается) → paid (оплачен) / cancelled (отменён).
+        "status": "pending",
         "created_at": now_kz().isoformat(),
     }
     bookings_col.insert_one(doc)
     return doc
+
+
+# Допустимые статусы оплаты брони.
+BOOKING_STATUSES = ("pending", "paid", "cancelled")
+
+
+def set_booking_status(booking_id, status):
+    """Меняет статус оплаты брони. Возвращает обновлённый документ (или None, если
+    бронь не найдена) — чтобы вызывающий мог уведомить клиента. Принимает _id строкой."""
+    if status not in BOOKING_STATUSES:
+        raise ValueError("Недопустимый статус брони")
+    if isinstance(booking_id, str):
+        if not ObjectId.is_valid(booking_id):
+            return None
+        booking_id = ObjectId(booking_id)
+    upd = {"status": status}
+    if status == "cancelled":
+        upd["cancelled_at"] = now_kz().isoformat()
+    if status == "paid":
+        upd["paid_at"] = now_kz().isoformat()
+    return bookings_col.find_one_and_update(
+        {"_id": booking_id}, {"$set": upd}, return_document=ReturnDocument.AFTER
+    )
 
 
 def list_bookings(limit=100, only_upcoming=False):
@@ -123,6 +160,56 @@ def bookings_in_range(date_from, date_to, zone=None):
         b["id"] = str(b.pop("_id"))
         out.append(b)
     return out
+
+
+def bookings_pending_reminder(before_iso):
+    """Брони (ожидается/оплачено) без отправленного напоминания, начинающиеся не
+    позднее before_iso (now + lead). Точную проверку времени делает вызывающий."""
+    return list(bookings_col.find({
+        "status": {"$in": ["pending", "paid"]},
+        "reminder_sent_at": {"$exists": False},
+        "start_at": {"$exists": True, "$lte": before_iso},
+    }))
+
+
+def bookings_pending_review(before_iso):
+    """Неотменённые брони без отправленной просьбы об отзыве, закончившиеся к before_iso."""
+    return list(bookings_col.find({
+        "status": {"$ne": "cancelled"},
+        "review_sent_at": {"$exists": False},
+        "end_at": {"$exists": True, "$lte": before_iso},
+    }))
+
+
+def mark_reminder_sent(booking_id):
+    bookings_col.update_one({"_id": booking_id}, {"$set": {"reminder_sent_at": now_kz().isoformat()}})
+
+
+def mark_review_sent(booking_id):
+    bookings_col.update_one({"_id": booking_id}, {"$set": {"review_sent_at": now_kz().isoformat()}})
+
+
+def backfill_notification_flags():
+    """Гасим уведомления для уже прошедших событий — чтобы при первом запуске не
+    разослать пачку напоминаний/отзывов за старые брони. Будущие брони не трогаем."""
+    now = now_kz().isoformat()
+    bookings_col.update_many(
+        {"start_at": {"$lte": now}, "reminder_sent_at": {"$exists": False}},
+        {"$set": {"reminder_sent_at": "skip"}},
+    )
+    bookings_col.update_many(
+        {"end_at": {"$lte": now}, "review_sent_at": {"$exists": False}},
+        {"$set": {"review_sent_at": "skip"}},
+    )
+
+
+def find_bookings_by_phone(phone, limit=5):
+    """Последние брони клиента (не отменённые), свежие сверху — для истории посещений."""
+    cursor = bookings_col.find({
+        "phone": _digits(phone),
+        "status": {"$ne": "cancelled"},
+    }).sort([("date", -1), ("time_from", -1)]).limit(limit)
+    return list(cursor)
 
 
 def find_active_bookings(phone):
@@ -327,15 +414,16 @@ def _sum_bookings(query):
 
 
 def _period_query(period):
-    """Фильтр броней по периоду в KZ-времени."""
+    """Фильтр броней по периоду в KZ-времени. Выручка/метрики — ТОЛЬКО по оплаченным
+    броням (status='paid'): ожидающие и отменённые в цифры не попадают."""
     now = now_kz()
     if period == "today":
-        return {"date": now.strftime("%Y-%m-%d")}
+        return {"status": "paid", "date": now.strftime("%Y-%m-%d")}
     if period == "week":
-        return {"created_at": {"$gte": (now - timedelta(days=7)).isoformat()}}
+        return {"status": "paid", "created_at": {"$gte": (now - timedelta(days=7)).isoformat()}}
     if period == "month":
-        return {"created_at": {"$gte": (now - timedelta(days=30)).isoformat()}}
-    return {}
+        return {"status": "paid", "created_at": {"$gte": (now - timedelta(days=30)).isoformat()}}
+    return {"status": "paid"}
 
 
 def get_stats(period="today"):
@@ -356,8 +444,9 @@ def get_owner_metrics():
     week_b, week_r, _ = get_stats("week")
     month_b, month_r, _ = get_stats("month")
 
-    # Прошлая неделя: брони, созданные в окне [14 дней назад; 7 дней назад).
+    # Прошлая неделя: ОПЛАЧЕННЫЕ брони, созданные в окне [14 дней назад; 7 дней назад).
     prev_week_b, prev_week_r = _sum_bookings({
+        "status": "paid",
         "created_at": {
             "$gte": (now - timedelta(days=14)).isoformat(),
             "$lt": (now - timedelta(days=7)).isoformat(),

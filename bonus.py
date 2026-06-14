@@ -30,6 +30,21 @@ def get_bonus(phone: str) -> dict:
     return _public(bonuses_col.find_one({"phone": p}), p)
 
 
+def format_bonus_summary(phone: str) -> str:
+    """Текст для бота: баланс бонусов клиента + последние операции (по его номеру)."""
+    acc = get_bonus(phone)
+    bal = acc.get("balance", 0)
+    lines = [f"Ваш бонусный баланс: {bal} бонусов."]
+    hist = acc.get("history", [])[:5]  # уже свежие сверху
+    if hist:
+        lines.append("Последние операции:")
+        for h in hist:
+            delta = h.get("delta", 0)
+            sign = "+" if delta >= 0 else ""
+            lines.append(f"  {sign}{delta} — {h.get('reason', '')}")
+    return "\n".join(lines)
+
+
 def _apply(phone: str, delta: int, reason: str, kind: str, name: str = "") -> dict:
     """Меняет баланс на delta и пишет запись в историю. Возвращает счёт."""
     p = normalize_phone(phone)

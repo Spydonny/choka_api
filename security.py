@@ -5,7 +5,7 @@ MAX_INPUT_LEN = 2000
 CONTROL_TOKENS = (
     "[[BOOKING]]", "[[/BOOKING]]", "[[CHECK]]", "[[/CHECK]]",
     "[[CANCEL]]", "[[/CANCEL]]", "[[MYBOOKINGS]]", "[[/MYBOOKINGS]]",
-    "[[SCHEDULE]]", "[[/SCHEDULE]]",
+    "[[SCHEDULE]]", "[[/SCHEDULE]]", "[[BONUS]]", "[[/BONUS]]",
 )
 INJECTION_PATTERNS = [
     re.compile(p, re.IGNORECASE)

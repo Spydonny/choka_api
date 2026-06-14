@@ -1,4 +1,5 @@
 """Точка входа: FastAPI-приложение, роуты и обработчик вебхука Green API."""
+import asyncio
 import os
 import traceback
 from contextlib import asynccontextmanager
@@ -16,12 +17,12 @@ from config import (
 )
 from db import (
     init_db, get_stats, get_owner_metrics, list_bookings, bookings_in_range,
-    list_conversations, conversation_messages, save_manual_message,
+    set_booking_status, list_conversations, conversation_messages, save_manual_message,
     is_blocked, block_phone, unblock_phone,
 )
 from ai import get_ai_reply
 from whatsapp import (
-    send_message_to_whatsapp, is_owner_phone, extract_incoming_text,
+    send_message_to_whatsapp, notify_client, is_owner_phone, extract_incoming_text,
     to_chat_id, digits_only,
 )
 
@@ -29,7 +30,19 @@ import admin_auth
 import bonus as bonus_svc
 import tournaments as tour_svc
 from phones import is_valid_phone, PHONE_ERROR
+from reminders import process_due_notifications
+from config import REMINDER_TICK_SECONDS
 from booking import try_create_booking, create_booking, check_availability, zones_occupancy
+
+
+async def _reminder_loop():
+    """Фоновый цикл: раз в REMINDER_TICK_SECONDS рассылает напоминания/отзывы."""
+    while True:
+        try:
+            await asyncio.to_thread(process_due_notifications)
+        except Exception as e:
+            print(f"reminder loop error: {e}")
+        await asyncio.sleep(REMINDER_TICK_SECONDS)
 
 
 @asynccontextmanager
@@ -37,7 +50,15 @@ async def lifespan(_app: FastAPI):
     init_db()
     port = int(os.environ.get("PORT", 8080))
     print(f"Choko Bot запущен на порту {port}")
-    yield
+    task = asyncio.create_task(_reminder_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="Choko Bot", lifespan=lifespan)
@@ -188,6 +209,10 @@ class BonusAuto(BaseModel):
     hours: Optional[int] = None
 
 
+class BookingStatusIn(BaseModel):
+    status: str  # pending | paid | cancelled
+
+
 class ChatSend(BaseModel):
     text: str
 
@@ -305,6 +330,27 @@ def admin_bookings_range(
     return {"bookings": bookings_in_range(date_from, date_to, zone)}
 
 
+@app.post("/admin/bookings/{booking_id}/status")
+def admin_set_booking_status(
+    booking_id: str, body: BookingStatusIn, _: bool = Depends(admin_auth.require_admin)
+):
+    """Меняет статус оплаты брони: pending (ожидается) / paid (оплачен) / cancelled."""
+    try:
+        doc = set_booking_status(booking_id, body.status)
+    except ValueError as e:
+        raise _bad_request(e)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Бронь не найдена")
+    # Авто-уведомление клиенту при подтверждении оплаты.
+    if body.status == "paid":
+        notify_client(
+            doc.get("phone", ""),
+            f"Оплата получена! {doc.get('zone_label', '')}, {doc.get('date', '')}, "
+            f"с {doc.get('time_from', '')} до {doc.get('time_to', '')}. Спасибо! Ждём вас.",
+        )
+    return {"id": booking_id, "status": body.status}
+
+
 @app.post("/admin/booking")
 def admin_create_booking(body: BookingIn, _: bool = Depends(admin_auth.require_admin)):
     """Ручное создание брони админом. Проверяет, что время в зоне не занято."""
@@ -320,6 +366,14 @@ def admin_create_booking(body: BookingIn, _: bool = Depends(admin_auth.require_a
             status_code=409 if result["status"] == "busy" else 400,
             detail=result["message"],
         )
+    # Авто-уведомление клиенту: бронь создал админ, в чат бота клиент не писал.
+    b = result["booking"]
+    notify_client(
+        phone,
+        f"Бронь получена! {b.get('zone_label', '')}, {b.get('date', '')}, "
+        f"с {b.get('time_from', '')} до {b.get('time_to', '')}, {b.get('persons', '')} чел. "
+        f"Стоимость: {b.get('amount', '')} ₸. Оплата: ожидается (на месте). Ждём вас!",
+    )
     return {"message": result["message"], "booking": result["booking"]}
 
 

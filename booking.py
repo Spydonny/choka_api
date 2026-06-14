@@ -5,7 +5,10 @@ from datetime import timedelta
 from typing import Any, Optional
 
 from config import ZONE_CAPACITY, ZONE_LABELS, ZONE_ALIASES, now_kz
-from db import bookings_col, save_booking, find_active_bookings, cancel_booking_doc, span_iso
+from db import (
+    bookings_col, save_booking, find_active_bookings, find_bookings_by_phone,
+    cancel_booking_doc, span_iso,
+)
 from pricing import booking_amount
 from whatsapp import notify_owner
 
@@ -220,7 +223,7 @@ def create_booking(chat_id: str, raw_booking: dict[str, Any]) -> dict[str, Any]:
         "status": "ok",
         "message": (
             f"Бронь принята! {label}, {b['date']}, с {b['time_from']} до {b['time_to']}, "
-            f"{b['persons']} чел. Стоимость: {b['amount']} ₸. "
+            f"{b['persons']} чел. Стоимость: {b['amount']} ₸. Оплата: ожидается (на месте). "
             f"Ждём вас! Если что-то изменится — напишите нам."
         ),
         "booking": out,
@@ -353,6 +356,14 @@ def week_schedule(raw: dict[str, Any], days: int = 7) -> str:
     )
 
 
+# Подписи статуса оплаты для клиента (status: pending/paid/cancelled).
+_PAYMENT_LABELS = {"pending": "ожидается оплата", "paid": "оплачено", "cancelled": "отменена"}
+
+
+def payment_label(status) -> str:
+    return _PAYMENT_LABELS.get(status or "pending", "ожидается оплата")
+
+
 def _format_booking(b: dict) -> str:
     """Короткое человекочитаемое описание брони для списков/подтверждений."""
     label = ZONE_LABELS.get(b.get("zone", ""), b.get("zone", ""))
@@ -368,8 +379,23 @@ def list_bookings(chat_id: str) -> str:
     active = find_active_bookings(phone)
     if not active:
         return "У вас нет активных броней."
-    lines = "\n".join(f"{i}. {_format_booking(b)}" for i, b in enumerate(active, 1))
+    lines = "\n".join(
+        f"{i}. {_format_booking(b)} — {payment_label(b.get('status'))}"
+        for i, b in enumerate(active, 1)
+    )
     return f"Ваши активные брони:\n{lines}\nЧтобы отменить — напишите, какую именно."
+
+
+def client_visits(chat_id: str) -> str:
+    """История последних броней клиента (по его телефону из chat_id) — для бота."""
+    phone = chat_id.split("@")[0]
+    rows = find_bookings_by_phone(phone, limit=5)
+    if not rows:
+        return "История посещений пока пуста."
+    lines = "\n".join(
+        f"- {_format_booking(b)} — {payment_label(b.get('status'))}" for b in rows
+    )
+    return f"История последних броней:\n{lines}"
 
 
 def cancel_booking(chat_id: str, raw: dict[str, Any]) -> str:
@@ -453,3 +479,8 @@ def extract_mybookings_block(reply: str) -> tuple[str, Optional[dict]]:
 def extract_schedule_block(reply: str) -> tuple[str, Optional[dict]]:
     """Достаёт [[SCHEDULE]] — занятость зоны на неделю (зона необязательна)."""
     return _extract_block(reply, "SCHEDULE", lenient=True)
+
+
+def extract_bonus_block(reply: str) -> tuple[str, Optional[dict]]:
+    """Достаёт [[BONUS]] — бонусы и история посещений клиента (параметры не нужны)."""
+    return _extract_block(reply, "BONUS", lenient=True)

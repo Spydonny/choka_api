@@ -13,9 +13,11 @@ from prompts import CLIENT_PROMPT, OWNER_PROMPT
 from security import sanitize_user_input, looks_like_injection
 from booking import (
     extract_booking_block, extract_check_block, extract_cancel_block,
-    extract_mybookings_block, extract_schedule_block, try_create_booking,
-    check_availability, cancel_booking, list_bookings, week_schedule,
+    extract_mybookings_block, extract_schedule_block, extract_bonus_block,
+    try_create_booking, check_availability, cancel_booking, list_bookings,
+    week_schedule, client_visits,
 )
+from bonus import format_bonus_summary
 from datetime_parse import parse_user_datetime
 
 client = Groq(api_key=GROQ_API_KEY)
@@ -110,13 +112,14 @@ def _strip_reasoning(reply: str) -> str:
 
 def _has_broken_control_block(reply: str) -> bool:
     """Маркер управляющего блока в ответе есть, но валидным блоком не распознался."""
-    has_marker = any(t in reply for t in ("BOOKING", "CHECK", "CANCEL", "MYBOOKINGS", "SCHEDULE"))
+    has_marker = any(t in reply for t in ("BOOKING", "CHECK", "CANCEL", "MYBOOKINGS", "SCHEDULE", "BONUS"))
     parsed = (
         extract_booking_block(reply)[1] is not None
         or extract_check_block(reply)[1] is not None
         or extract_cancel_block(reply)[1] is not None
         or extract_mybookings_block(reply)[1] is not None
         or extract_schedule_block(reply)[1] is not None
+        or extract_bonus_block(reply)[1] is not None
     )
     return has_marker and not parsed
 
@@ -188,6 +191,7 @@ def get_ai_reply(user_id: str, user_message: str, is_owner: bool = False) -> str
         visible, cancel = extract_cancel_block(visible)
         visible, mybookings = extract_mybookings_block(visible)
         visible, schedule = extract_schedule_block(visible)
+        visible, bonus_info = extract_bonus_block(visible)
 
         if booking is not None:
             # Дату/время не доверяем модели — парсим из текста клиента на сервере
@@ -213,6 +217,10 @@ def get_ai_reply(user_id: str, user_message: str, is_owner: bool = False) -> str
         elif schedule is not None:
             # Занятость зоны на неделю — реальное расписание из базы (нужна только зона).
             result = week_schedule(schedule)
+            visible = f"{visible}\n{result}".strip() if visible else result
+        elif bonus_info is not None:
+            # Бонусы и история посещений клиента — по его телефону (из chat_id, не из текста).
+            result = f"{format_bonus_summary(user_id)}\n\n{client_visits(user_id)}"
             visible = f"{visible}\n{result}".strip() if visible else result
         elif _has_broken_control_block(reply):
             # Маркер брони/проверки был, но JSON не распарсился — не делаем вид,
