@@ -12,6 +12,7 @@ bookings_col = db["bookings"]
 sessions_col = db["sessions"]
 tournaments_col = db["tournaments"]
 bonuses_col = db["bonuses"]
+blocked_col = db["blocked"]
 
 
 def init_db():
@@ -26,6 +27,8 @@ def init_db():
     tournaments_col.create_index("created_at")
     # Бонусный баланс — один документ на телефон.
     bonuses_col.create_index("phone", unique=True)
+    # Заблокированные клиенты — один документ на телефон.
+    blocked_col.create_index("phone", unique=True)
     # Доставляем интервал старым броням, у которых его ещё нет.
     backfill_booking_spans()
 
@@ -139,6 +142,43 @@ def save_manual_message(phone, text):
     })
 
 
+# ─── Блокировка клиентов ────────────────────────────────────────
+def _digits(phone):
+    """Только цифры номера — единый ключ для блокировок."""
+    return re.sub(r"\D", "", phone or "")
+
+
+def is_blocked(phone) -> bool:
+    """Заблокирован ли клиент (бот игнорирует его сообщения)."""
+    key = _digits(phone)
+    return bool(key) and blocked_col.count_documents({"phone": key}, limit=1) > 0
+
+
+def block_phone(phone) -> str:
+    """Блокирует клиента по номеру. Возвращает нормализованный номер."""
+    key = _digits(phone)
+    if not key:
+        raise ValueError("Некорректный номер телефона")
+    blocked_col.update_one(
+        {"phone": key},
+        {"$setOnInsert": {"phone": key, "created_at": now_kz().isoformat()}},
+        upsert=True,
+    )
+    return key
+
+
+def unblock_phone(phone) -> str:
+    """Снимает блокировку с клиента. Возвращает нормализованный номер."""
+    key = _digits(phone)
+    blocked_col.delete_one({"phone": key})
+    return key
+
+
+def list_blocked():
+    """Множество заблокированных номеров (только цифры)."""
+    return {b["phone"] for b in blocked_col.find({}, {"phone": 1})}
+
+
 # ─── Чаты WhatsApp для админ-панели ─────────────────────────────
 def list_conversations(limit=80):
     """Список диалогов WhatsApp (по телефону) с последним сообщением и временем."""
@@ -154,6 +194,7 @@ def list_conversations(limit=80):
         {"$sort": {"last_time": -1}},
         {"$limit": limit},
     ]
+    blocked = list_blocked()
     out = []
     for r in sessions_col.aggregate(pipeline):
         last = r.get("last_response") or r.get("last_message") or ""
@@ -162,6 +203,7 @@ def list_conversations(limit=80):
             "last": last,
             "time": r.get("last_time"),
             "count": r.get("count", 0),
+            "blocked": _digits(r["_id"]) in blocked,
         })
     return out
 

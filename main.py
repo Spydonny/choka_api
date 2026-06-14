@@ -17,6 +17,7 @@ from config import (
 from db import (
     init_db, get_stats, get_owner_metrics, list_bookings,
     list_conversations, conversation_messages, save_manual_message,
+    is_blocked, block_phone, unblock_phone,
 )
 from ai import get_ai_reply
 from whatsapp import (
@@ -69,6 +70,10 @@ def process_incoming_webhook(data: dict[str, Any]) -> None:
     if not chat_id:
         print("DEBUG: в вебхуке нет senderData.chatId")
         print(f"DEBUG: полный вебхук: {data}")
+        return
+
+    if is_blocked(chat_id):
+        print(f"DEBUG: клиент {chat_id} заблокирован — сообщение проигнорировано")
         return
 
     user_message = extract_incoming_text(data)
@@ -334,6 +339,23 @@ def admin_chat_send(
         raise HTTPException(status_code=502, detail=f"Green API вернул {resp.status_code}: {resp.text}")
     save_manual_message(digits_only(phone), text)
     return {"ok": True}
+
+
+@app.post("/admin/chats/{phone}/block")
+def admin_chat_block(phone: str, _: bool = Depends(admin_auth.require_admin)):
+    """Блокирует клиента: бот перестаёт отвечать на его сообщения в WhatsApp."""
+    try:
+        block_phone(phone)
+    except ValueError as e:
+        raise _bad_request(e)
+    return {"phone": digits_only(phone), "blocked": True}
+
+
+@app.post("/admin/chats/{phone}/unblock")
+def admin_chat_unblock(phone: str, _: bool = Depends(admin_auth.require_admin)):
+    """Снимает блокировку с клиента."""
+    unblock_phone(phone)
+    return {"phone": digits_only(phone), "blocked": False}
 
 
 @app.get("/admin/bonus/{phone}")
