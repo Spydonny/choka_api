@@ -6,8 +6,9 @@ from groq import Groq
 
 from config import (
     GROQ_API_KEY, GROQ_MODEL, MAX_TOKENS, TEMPERATURE, MAX_HISTORY,
-    HISTORY_TTL_HOURS, now_kz, CLUB_INFO,
+    HISTORY_TTL_HOURS, now_kz,
 )
+import settings_store
 from db import get_owner_metrics, load_history, save_session
 from prompts import CLIENT_PROMPT, OWNER_PROMPT
 from security import sanitize_user_input, looks_like_injection
@@ -61,14 +62,15 @@ _NO_THINK = " /no_think"
 
 
 def build_contacts_context() -> str:
-    """Реальные контакты клуба из config — чтобы бот давал настоящий телефон/адрес,
+    """Реальные контакты клуба из настроек — чтобы бот давал настоящий телефон/адрес,
     а не выдумывал номер (был баг: модель сама сочиняла «+7 (707) ...»)."""
+    s = settings_store.get_all()
     return (
         "\n\nКОНТАКТЫ КЛУБА (если клиент спрашивает телефон/адрес/часы или как связаться — "
         "давай ИМЕННО эти данные, другие номера не выдумывай):\n"
-        f"Телефон: {CLUB_INFO['phone']}\n"
-        f"Адрес: {CLUB_INFO['address']}\n"
-        f"Часы работы: {CLUB_INFO['hours']}"
+        f"Телефон: {s['club_phone']}\n"
+        f"Адрес: {s['club_address']}\n"
+        f"Часы работы: {s['club_hours']}"
     )
 
 

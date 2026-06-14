@@ -7,15 +7,13 @@
 """
 from datetime import datetime, timedelta
 
-from config import (
-    ZONE_LABELS, GREEN_API_ID, now_kz,
-    REMINDER_LEAD_MINUTES, REVIEW_MAX_AGE_HOURS,
-)
+from config import ZONE_LABELS, GREEN_API_ID, now_kz
 from db import (
     bookings_pending_reminder, bookings_pending_review,
     mark_reminder_sent, mark_review_sent,
 )
 from whatsapp import notify_client
+import settings_store
 
 
 def _parse(iso):
@@ -48,8 +46,8 @@ def process_due_notifications():
 
     now = now_kz()
 
-    # 1) Напоминания: бронь начинается в ближайшие REMINDER_LEAD_MINUTES минут.
-    horizon = now + timedelta(minutes=REMINDER_LEAD_MINUTES)
+    # 1) Напоминания: бронь начинается в ближайшие N минут (из настроек).
+    horizon = now + timedelta(minutes=settings_store.get("reminder_lead_minutes"))
     for b in bookings_pending_reminder(horizon.isoformat()):
         start = _parse(b.get("start_at"))
         if start and now < start:
@@ -57,8 +55,8 @@ def process_due_notifications():
         # Уже начавшиеся (start <= now) просто помечаем, чтобы не висели.
         mark_reminder_sent(b["_id"])
 
-    # 2) Отзывы: бронь недавно закончилась (не позже REVIEW_MAX_AGE_HOURS назад).
-    oldest = now - timedelta(hours=REVIEW_MAX_AGE_HOURS)
+    # 2) Отзывы: бронь недавно закончилась (не позже N часов назад, из настроек).
+    oldest = now - timedelta(hours=settings_store.get("review_max_age_hours"))
     for b in bookings_pending_review(now.isoformat()):
         end = _parse(b.get("end_at"))
         if end and end >= oldest:

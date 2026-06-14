@@ -12,7 +12,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from config import (
-    VERIFY_TOKEN, GROQ_MODEL, CLUB_INFO, TARIFFS, MENU, BONUS_CASHBACK_PCT,
+    VERIFY_TOKEN, GROQ_MODEL, CLUB_INFO, TARIFFS, MENU,
     GREEN_API_ID, OWNER_PHONE,
 )
 from db import (
@@ -29,6 +29,7 @@ from whatsapp import (
 import admin_auth
 import bonus as bonus_svc
 import tournaments as tour_svc
+import settings_store
 from phones import is_valid_phone, PHONE_ERROR
 from reminders import process_due_notifications
 from config import REMINDER_TICK_SECONDS
@@ -175,6 +176,7 @@ class BookingIn(BaseModel):
     time_from: str
     time_to: str
     persons: int = 1
+    seat: Optional[int] = None  # конкретное место/стол (1..вместимость), опц.
 
 
 class CheckIn(BaseModel):
@@ -213,6 +215,17 @@ class BookingStatusIn(BaseModel):
     status: str  # pending | paid | cancelled
 
 
+class SettingsIn(BaseModel):
+    club_name: Optional[str] = None
+    club_phone: Optional[str] = None
+    club_address: Optional[str] = None
+    club_hours: Optional[str] = None
+    cashback_pct: Optional[int] = None
+    bonus_accrue_window_hours: Optional[int] = None
+    reminder_lead_minutes: Optional[int] = None
+    review_max_age_hours: Optional[int] = None
+
+
 class ChatSend(BaseModel):
     text: str
 
@@ -224,10 +237,15 @@ def _bad_request(e: Exception):
 # ─── Публичные эндпоинты (юзер-часть, без авторизации) ──────────
 @app.get("/api/info")
 def api_info():
-    wa_digits = digits_only(CLUB_INFO.get("phone", ""))
+    s = settings_store.get_all()
+    wa_digits = digits_only(s["club_phone"])
     return {
-        **CLUB_INFO,
-        "cashback_pct": BONUS_CASHBACK_PCT,
+        "name": s["club_name"],
+        "city": CLUB_INFO.get("city", ""),
+        "address": s["club_address"],
+        "phone": s["club_phone"],
+        "hours": s["club_hours"],
+        "cashback_pct": s["cashback_pct"],
         "whatsapp_url": f"https://wa.me/{wa_digits}" if wa_digits else "",
     }
 
@@ -303,6 +321,20 @@ def api_booking_create(body: BookingIn):
 @app.post("/admin/login")
 def admin_login(body: LoginIn):
     return {"token": admin_auth.login(body.password)}
+
+
+# ─── Админ: настройки клуба ─────────────────────────────────────
+@app.get("/admin/settings")
+def admin_get_settings(_: bool = Depends(admin_auth.require_admin)):
+    return settings_store.get_all()
+
+
+@app.post("/admin/settings")
+def admin_update_settings(body: SettingsIn, _: bool = Depends(admin_auth.require_admin)):
+    try:
+        return settings_store.update(body.model_dump(exclude_none=True))
+    except ValueError as e:
+        raise _bad_request(e)
 
 
 # ─── Админ: метрики и брони ─────────────────────────────────────

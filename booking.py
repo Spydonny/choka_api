@@ -63,6 +63,54 @@ def count_overlapping(zone_key: str, date: str, t_from: int, t_to: int) -> int:
     })
 
 
+def seat_taken(zone_key: str, date: str, t_from: int, t_to: int, seat: int) -> bool:
+    """Занято ли КОНКРЕТНОЕ место (стол/приставка) в интервале — есть ли бронь
+    именно с этим seat, пересекающаяся по времени."""
+    q_start = span_iso(date, t_from)
+    q_end = span_iso(date, t_to)
+    if not q_start or not q_end:
+        return False
+    return bookings_col.count_documents({
+        "zone": zone_key,
+        "status": {"$ne": "cancelled"},
+        "seat": seat,
+        "start_at": {"$lt": q_end},
+        "end_at": {"$gt": q_start},
+    }) > 0
+
+
+def occupied_seats(zone_key: str, date: str, t_from: int, t_to: int, capacity: int) -> set[int]:
+    """Множество занятых мест в интервале. Брони с явным seat занимают своё место;
+    брони без места (бот/сайт) раскладываем по свободным местам по возрастанию —
+    чтобы карта мест была корректной при смешанных бронях."""
+    q_start = span_iso(date, t_from)
+    q_end = span_iso(date, t_to)
+    if not q_start or not q_end:
+        return set()
+    cursor = bookings_col.find({
+        "zone": zone_key,
+        "status": {"$ne": "cancelled"},
+        "start_at": {"$lt": q_end},
+        "end_at": {"$gt": q_start},
+    }, {"seat": 1})
+
+    occupied: set[int] = set()
+    seatless = 0
+    for b in cursor:
+        s = b.get("seat")
+        if isinstance(s, int) and 1 <= s <= capacity:
+            occupied.add(s)
+        else:
+            seatless += 1
+    seat = 1
+    while seatless > 0 and seat <= capacity:
+        if seat not in occupied:
+            occupied.add(seat)
+            seatless -= 1
+        seat += 1
+    return occupied
+
+
 def zones_occupancy(
     date: Optional[str] = None,
     time_from: Optional[str] = None,
@@ -86,14 +134,16 @@ def zones_occupancy(
 
     zones = []
     for key, capacity in ZONE_CAPACITY.items():
-        busy = min(count_overlapping(key, date, t_from, t_to), capacity)
+        occ = occupied_seats(key, date, t_from, t_to, capacity)
+        busy = len(occ)
         zones.append({
             "key": key,
             "label": ZONE_LABELS[key],
             "capacity": capacity,
             "busy": busy,
             "free": capacity - busy,
-            "spots": [{"index": i + 1, "occupied": i < busy} for i in range(capacity)],
+            # Конкретные занятые места (по номеру), а не «первые N».
+            "spots": [{"index": i + 1, "occupied": (i + 1) in occ} for i in range(capacity)],
         })
 
     return {
@@ -142,6 +192,16 @@ def validate_booking(booking: dict[str, Any]) -> tuple[bool, str, Optional[dict]
 
     name = str(booking.get("name", "")).strip() or "Гость"
 
+    # Конкретное место (стол/приставка). Необязательно: None — система покажет
+    # любое свободное. Если задано — должно быть в пределах вместимости зоны.
+    seat = booking.get("seat")
+    try:
+        seat = int(seat) if seat not in (None, "") else None
+    except (TypeError, ValueError):
+        seat = None
+    if seat is not None and not (1 <= seat <= ZONE_CAPACITY[zone]):
+        return False, f"Такого места нет: в зоне «{ZONE_LABELS[zone]}» места с 1 по {ZONE_CAPACITY[zone]}.", None
+
     # Сумму НЕ берём у модели — считаем в коде по длительности, зоне и времени
     # начала (нужно для акции бильярда 12:00–18:00). См. pricing.py.
     amount = booking_amount(t_to - t_from, zone, start_minute=t_from)
@@ -155,6 +215,7 @@ def validate_booking(booking: dict[str, Any]) -> tuple[bool, str, Optional[dict]
         "_t_to": t_to,
         "persons": persons,
         "name": name,
+        "seat": seat,
         "amount": amount,
     }
     return True, "", normalized
@@ -188,6 +249,19 @@ def create_booking(chat_id: str, raw_booking: dict[str, Any]) -> dict[str, Any]:
             "booking": None,
         }
 
+    # Если выбрано конкретное место — оно не должно быть занято в это время.
+    if b.get("seat") is not None and seat_taken(b["zone"], b["date"], b["_t_from"], b["_t_to"], b["seat"]):
+        return {
+            "ok": False,
+            "status": "busy",
+            "message": (
+                f"Место №{b['seat']} в зоне «{label}» на {b['date']} "
+                f"с {b['time_from']} до {b['time_to']} уже занято. "
+                "Выберите другое место, время или дату."
+            ),
+            "booking": None,
+        }
+
     phone = chat_id.split("@")[0]
     doc = save_booking(
         phone=phone,
@@ -200,6 +274,7 @@ def create_booking(chat_id: str, raw_booking: dict[str, Any]) -> dict[str, Any]:
         amount=b["amount"],
         start_at=span_iso(b["date"], b["_t_from"]),
         end_at=span_iso(b["date"], b["_t_to"]),
+        seat=b.get("seat"),
     )
 
     # Кэшбэк начисляется не при создании брони, а вручную админом по номеру
@@ -218,12 +293,13 @@ def create_booking(chat_id: str, raw_booking: dict[str, Any]) -> dict[str, Any]:
 
     out = dict(doc)
     out["id"] = str(out.pop("_id", ""))
+    seat_note = f" Место №{b['seat']}." if b.get("seat") is not None else ""
     return {
         "ok": True,
         "status": "ok",
         "message": (
             f"Бронь принята! {label}, {b['date']}, с {b['time_from']} до {b['time_to']}, "
-            f"{b['persons']} чел. Стоимость: {b['amount']} ₸. Оплата: ожидается (на месте). "
+            f"{b['persons']} чел.{seat_note} Стоимость: {b['amount']} ₸. Оплата: ожидается (на месте). "
             f"Ждём вас! Если что-то изменится — напишите нам."
         ),
         "booking": out,

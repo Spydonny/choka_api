@@ -15,6 +15,7 @@ sessions_col = db["sessions"]
 tournaments_col = db["tournaments"]
 bonuses_col = db["bonuses"]
 blocked_col = db["blocked"]
+settings_col = db["settings"]
 
 
 def init_db():
@@ -82,7 +83,7 @@ def backfill_booking_spans():
 
 
 def save_booking(phone, name, zone_key, date, time_from, time_to, persons,
-                 amount=0, start_at=None, end_at=None):
+                 amount=0, start_at=None, end_at=None, seat=None):
     doc = {
         "phone": phone,
         "name": name,
@@ -91,6 +92,8 @@ def save_booking(phone, name, zone_key, date, time_from, time_to, persons,
         "date": date,
         "time_from": time_from,
         "time_to": time_to,
+        # Конкретное место/стол (1..вместимость) или None, если не выбрано.
+        "seat": seat,
         # Нормализованные границы интервала (KZ ISO) — для проверки пересечений.
         "start_at": start_at,
         "end_at": end_at,

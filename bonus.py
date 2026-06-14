@@ -5,9 +5,10 @@
 и вручную админом. Списываются (redeem) при оплате бонусами.
 История операций хранится прямо в документе счёта.
 """
-from config import BONUS_CASHBACK_PCT, BONUS_ACCRUE_WINDOW_HOURS, now_kz
+from config import now_kz
 from db import bonuses_col, find_last_booking_within, mark_booking_accrued
 from phones import normalize_phone, is_valid_phone, PHONE_ERROR
+import settings_store
 
 
 def _public(doc: dict | None, phone: str) -> dict:
@@ -93,18 +94,21 @@ def redeem_bonus(phone: str, amount: int, reason: str = "Списание бон
     return _apply(phone, -amount, reason, "redeem")
 
 
-def accrue_from_last_booking(phone: str, hours: int = BONUS_ACCRUE_WINDOW_HOURS) -> dict:
+def accrue_from_last_booking(phone: str, hours=None) -> dict:
     """Начисляет кэшбэк по ПОСЛЕДНЕЙ броне клиента за последние `hours` часов.
 
-    Сумму бонусов считаем от стоимости этой брони (BONUS_CASHBACK_PCT). Одну и ту
-    же бронь повторно не начисляем (флаг bonus_accrued на документе брони).
-    Возвращает обновлённый бонусный счёт (как add_bonus/redeem_bonus).
+    Процент кэшбэка и окно берём из настроек (settings_store), не из констант, —
+    чтобы их можно было менять из админки. Одну и ту же бронь повторно не
+    начисляем (флаг bonus_accrued на документе брони).
     """
     if not is_valid_phone(phone):
         raise ValueError(PHONE_ERROR)
     p = normalize_phone(phone)
-    if BONUS_CASHBACK_PCT <= 0:
+    pct = settings_store.get("cashback_pct")
+    if pct <= 0:
         raise ValueError("Начисление кэшбэка отключено")
+    if hours is None:
+        hours = settings_store.get("bonus_accrue_window_hours")
 
     booking = find_last_booking_within(p, hours)
     if not booking:
@@ -113,12 +117,12 @@ def accrue_from_last_booking(phone: str, hours: int = BONUS_ACCRUE_WINDOW_HOURS)
         raise ValueError("По последней брони бонусы уже начислены")
 
     amount = int(booking.get("amount") or 0)
-    bonus = round(amount * BONUS_CASHBACK_PCT / 100)
+    bonus = round(amount * pct / 100)
     if bonus <= 0:
         raise ValueError("По последней брони не из чего начислить (сумма 0)")
 
     reason = (
-        f"Кэшбэк {BONUS_CASHBACK_PCT}% с брони "
+        f"Кэшбэк {pct}% с брони "
         f"{booking.get('date', '')} {booking.get('time_from', '')} ({amount} ₸)"
     ).strip()
     account = _apply(p, bonus, reason, "accrue", booking.get("name", ""))
